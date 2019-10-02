@@ -4,7 +4,7 @@
 const NetServer = require('./net-server')
 
 const ConsumerLimits = require('./consumer-limits')
-const SpikeHandler = require('./spike-handler')
+const BurstHandler = require('./burst-handler')
 const Authorizer = require('./auth-handler')
 const HeaderOps = require('./header-ops')
 const BodyOps = require('./body-ops')
@@ -47,9 +47,9 @@ function setupQuota(quota) {
 }
 
 // ---- ---- ---- ---- ---- ----
-function setupSpikeArrest(spikeConfig) {
-	var spiker = new SpikeHandler(spikeConfig)  // the interface to shared memory
-	appServer.setSpikeHandler(spiker)
+function setupBurstResponse(burstConfig) {   // down sample and mqtt to burst topic
+	var burster = new BurstHandler(burstConfig)  // the interface to shared memory
+	appServer.setBurstHandler(burster)
 }
 
 // ---- ---- ---- ---- ---- ----
@@ -93,8 +93,8 @@ if ( process.send ) {
 				   if ( msg.quota !== undefined ) {
 			   			setupQuota(quota)
 				   }
-				   if ( msg.spike_config !== undefined ) {
-			   			setupSpikeArrest(msg.spike_config)
+				   if ( msg.burst_config !== undefined ) {
+			   			setupBurstResponse(msg.burst_config)
 				   }
 				   if ( msg.authorizer !== undefined ) {
 					   setupAuthorizer(msg.authorizer)

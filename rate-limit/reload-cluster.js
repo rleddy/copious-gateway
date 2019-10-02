@@ -638,6 +638,21 @@ class ClusterManager extends EventEmitter {
 	    }
 		return(result)
     }
+	
+	foreachTracked(fn) {
+		var result = []
+		for ( var key in tTracked ) {
+			fn(tTracked[key])
+		}
+	}
+	
+	access(id) {
+		var worker = cluster.workers[this.worker_key]
+		if ( worker ) {
+			return worker
+		}
+		return false
+	}
 
     // -----countTracked--------------------------------------------------
     // for testing or info check
