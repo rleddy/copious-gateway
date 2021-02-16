@@ -6,7 +6,10 @@ const crypto = require('crypto');
 const rcluster = require('./reload-cluster')
 const KeyedShm = require('./keyed-shm')
 const g_ShaSecret = require('./localsha')   // this is the salt
+const { createECDH, ECDH } = require('crypto');
 
+
+var g_config = {}
 
 const CTLS_URL = "https://.......";
 
@@ -37,21 +40,47 @@ var g_memkey = parseInt(shmKey)
 
 
 var g_myID = getMac()
-var myPublicKey = ""
+var g_myPublicKey = ""
+var g_mqttKey = ""
 
 
 function registerService() {
+	
 	var opts = {
-	method: "POST"
+		method: "POST",
 		form : {
 			"whoami" : g_myID
 		}
 	}
-	require(CTLS_URL,opts,(err,body) => {
-				myPublicKey = body.toString();
-			})
+	require(CTLS_URL,opts,(err,body) => {  // get back the starter information that unlock this app.
+			if ( err ) {
+				console.error("FATAL: application did not obtain appropriate permissions to start")
+				process.exit(0)
+			}
+			var secrets = body.toString();
+			secrets = JSON.parse(secrets)
+			g_myPublicKey = secrets.pubKey;
+			g_mqttKey = secrets.mqttTopic;
+			if ( secrets.ecdhKey ) {
+				g_config.authorizer = {}   // if this came duing intialization...
+				g_config.authorizer.procLocalKey = secrets.ecdhKey;
+				g_config.authorizer.procShaSecret = secrets.procSecret;
+			}
+		})
 }
 
+
+/*
+ async function getUserAsync(name)
+ {
+ let response = await fetch(`https://api.github.com/users/${name}`);
+ let data = await response.json()
+ return data;
+ }
+ 
+ getUserAsync('yourUsernameHere')
+ .then(data => console.log(data)
+*/
 
 
 // ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -99,7 +128,7 @@ async function decipher(fogmessage,aes_key) {
 	var kl = fogmessage[0] ^ 0xE2 // as utf8 encoded
 	var iv = fogmessage.substr(1,kl)
 	var message = fogmessage.substr(kl)
-	iv = await decrypt(iv,myPublicKey)
+	iv = await decrypt(iv,g_myPublicKey)
 	var clearM = await aesDecipher(message,aes_key,iv)
 	return(clearM)
 }
@@ -122,7 +151,7 @@ async function decrypt(message,pubKey) {
 
 //
 function setAES(message) {
-	decrypt(message,myPublicKey).then(key => {
+	decrypt(message,g_myPublicKey).then(key => {
 									 gAES = key
 							  }).error((err) => {})
 }
@@ -216,31 +245,19 @@ function sendWokers(new_config) {
 						})
 }
 
+function setNonce(nonce) {
+	sendWokers({
+			   "nonce_only" : true,
+			   "nonce" : nonce
+	})
+}
+
 // ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 // ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
 var mqtt = require('mqtt')
 var mqtt_client  = mqtt.connect('mqtt://test.mosquitto.org')  // point to our server
 
-var g_config = {}
-
-
-//
-var g_mqttKey = fs.readFileSync('confighash.txt','ascii').toString()
-if ( !isHash(g_mqttKey) ) {
-	fs.access(g_mqttKey,(err) => {
-			  if ( err ) {
-			  	console.log("no configuration could be found")
-			  } else {
-				  var config = fs.readFileSync(g_mqttKey,'ascii').toString()
-				  do_configure(config)
-				  g_mqttKey = do_hash(config)
-				  setSubscriptions(g_mqttKey)
-			  }
-			})
-} else {
-	setSubscriptions(g_mqttKey)
-}
 
 
 do_configure(confstr) {
@@ -254,7 +271,7 @@ do_configure(confstr) {
 
 var mqttAES_topic = ""
 var mqttConfig_topic = ""
-
+var mqttNONCE_topic = ""
 
 function setSubscriptions(an_mqttKey) {
 	//
@@ -277,6 +294,14 @@ function setSubscriptions(an_mqttKey) {
 	//
 	mqttConfig_topic = an_mqttKey + "-config"
 	mqtt_client.subscribe(mqttAES_topic, (err) => {
+						  if ( !err ) {
+						  		// mqtt_client.publish('presence', 'Hello mqtt')
+						  } else {
+						  		//
+						  }
+					})
+	mqttNONCE_topic = an_mqttKey + "-NONCE"
+	mqtt_client.subscribe(mqttNONCE_topic, (err) => {
 						  if ( !err ) {
 						  		// mqtt_client.publish('presence', 'Hello mqtt')
 						  } else {
@@ -306,16 +331,25 @@ function unsetSubscriptions(an_mqttKey) {
 										})
 	//
 	mqttConfig_topic = an_mqttKey + "-config"
-	mqtt_client.subunsubscribescribe(mqttAES_topic, (err) => {
+	mqtt_client.unsubscribe(mqttAES_topic, (err) => {
 											  if ( !err ) {
 											  // mqtt_client.publish('presence', 'Hello mqtt')
 											  } else {
 											  //
 											  }
 					})
+	mqttNONCE_topic = an_mqttKey + "-NONCE"
+	mqtt_client.unsubscribe(mqttNONCE_topic, (err) => {
+						  if ( !err ) {
+						  		// mqtt_client.publish('presence', 'Hello mqtt')
+						  } else {
+						  		//
+						  }
+					})
+
 }
 
-mqtt_client.on('connect', function () {
+mqtt_client.on('connect', () => {
 			   })
 
 
@@ -329,6 +363,9 @@ mqtt_client.on('message', (topic, message) => {
 											setSubscriptions(topic)
 									   }
 									   //
+									} else if ( topic === mqttNONCE_topic ) {
+			   							// the next message coming back this way should deliever ans AES key
+										setNonce(message)
 								   } else if ( topic === mqttAES_topic ) {
 			   							// the next message coming back this way should deliever ans AES key
 										setAES(message)

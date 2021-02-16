@@ -9,13 +9,23 @@
 #include <fstream>
 #include <ctime>
 
+#include "umqtt.h"
+#include <signal.h>
+
+
 // qcheck check for quota...
 
 using namespace std;
 
 /*
+ 	qcheck
  
-	qcheck keeps track of quotas.  It loops through shared memory by resource.
+ 	There is one qcheck per per gang of core processes each of which relays resource consumption requests to qcheck.
+ 
+ 	qcheck manages the rate of consumption and defers requests to external interface services responsive to signals
+ 	sent by queuesignal from this process. External interface means outside of the multicore processor beyond BUS transactions.
+ 
+	qcheck keeps track of quotas for a collection of resources.  It loops through shared memory by resource.
  	//
  	For each process running on a core, there is a table in of resources.
  	Each core table occupies a region of memory.
@@ -35,8 +45,9 @@ using namespace std;
  	qcheck reacts to a 1 in a requester byte by saving the address of the next byte (the permission byte). The addresses
 	are saved in a list (order does not matter).  Here, this list is implemented as an array with a moving index into the end.
  	qcheck then goes through the address list and writes a 1 if there is quota left, and 0 otherwise.
- 
 */
+
+unsigned int g_quotapid = -1; // the process id of the network interface for quotas
 
 #define STARTER_QUOTA_ALLOTMENT 1000
 
@@ -55,20 +66,36 @@ clock_t g_resource_check_times[MAX_RESOURCES];
 
 unsigned char *g_ControlArea = NULL;
 
+#define ID_DEF "utest123"     // set by env or take from the control area
+const char g_identifier = ID_DEF;
+
+const unsigned int g_shared_prog_signal = SIGUSR1;
+
+
+// struct umqtt_client *app_mqtt_client = NULL;
+
+//
+//
 void init_resource_quotas(void) {
 	// really request this or read from file or something.
 	for ( unsigned int i = 0; i < MAX_RESOURCES; i++ ) {
 		g_resource_quotas[i] = STARTER_QUOTA_ALLOTMENT;
 		g_prev_quotas[i] = 0;
-		g_resource_check_times = time();
+		g_resource_check_times[i] = time();
 	}
 }
 
+
+//
+//
 inline unsigned long int fetchQuota(unsigned char p) {
 	// request it or set it by timeout, etc.
 	return(g_resource_quotas[p]);
 }
 
+
+//
+//
 inline bool timecycle(unsigned char p) {
 	clock_t t = time();
 	if ( (t - g_resource_check_times[p]) > (PREDFINED_TIME_DELTA*1000) ) {
@@ -78,36 +105,51 @@ inline bool timecycle(unsigned char p) {
 	return(false);
 }
 
+
+//
+//
 inline void resetQuota(unsigned char p,unsigned long int currentQuota) {
 	g_prev_quotas[p] = g_resource_quotas[p];
 	g_resource_quotas[p] = currentQuota;
-	// if ( timecycle(p) ) {
-		/*
-		 	double dlta_t = PREDFINED_TIME_DELTA;
-			unsigned char *res_control = g_ControlArea + p*CONTROL_AREA_SIZE;
-		 	double *qvalues = (double *)(res_control + CONTROL_AREA_INTS)
-		 	double qrate = (g_prev_quotas[p] - g_resource_quotas[p])/dlta_t;
-		 	double qpercent = g_resource_quotas[p]/STARTER_QUOTA_ALLOTMENT;
-		 	qvalues[0] = qpercent;
-			qvalues[1] = qrate;
-		 	res_control[0] = 1; // tell network to negotiate
-			set_interval_timeout([](){
-						if ( control[0] == 0 ) {
-		 					//
-		 					g_resource_quotas[p] = *((unsigned lon int *)(res_control + 1))
-						}
-		 			},10)
-		*/
-		// emit quota percentage
-		// emit rate of decrease
-	// }
+	if ( timecycle(p) && (g_quotapid > 0) ) {
+		//
+		double dlta_t = PREDFINED_TIME_DELTA;
+		// read from the control areas of memory.
+		// there is one control area per resource, p.
+		unsigned char *res_control = g_ControlArea + p*CONTROL_AREA_SIZE;
+		double *qvalues = (double *)(res_control + CONTROL_AREA_INTS)
+		//
+		double qrate = (g_prev_quotas[p] - g_resource_quotas[p])/dlta_t;
+		double qpercent = g_resource_quotas[p]/STARTER_QUOTA_ALLOTMENT;
+		//
+		qvalues[0] = qpercent;
+		qvalues[1] = qrate;
+		//
+		res_control[0] = 1; // tell network to negotiate.. expect a 2 to be written on update of next address
+		//
+		union sigval sigp;
+		sigp.sival_int = p;
+		sigqueue(g_quotapid,g_shared_prog_signal,sigp);  //
+	}
 }
 
-/*
-	on quota update per resource...
- 	//
- 	g_resource_quotas[p] = event.quota_update ...
-*/
+//
+//
+void sig_quota_update(int signumm,siginfo_t *sinfo, void *context) {
+	//
+	if ( sinfo && (sinfo.si_pid == g_quotapid) ) {
+		for ( unsigned char i = 0; i < MAX_RESOURCES; i++ ) {
+			unsigned char *res_control = g_ControlArea + i*CONTROL_AREA_SIZE;  // just look at the ints (flag and quota)
+			if ( res_control[0] == 2 ) {
+				*res_control++ = 0;
+				unsigned long int q = *((unsigned long int *)(res_control));  // get the new quota
+				g_resource_quotas[i] = q;
+			}
+		}
+	}
+	//
+}
+
 
 inline bool running(void) {
 	return g_is_running;
@@ -126,6 +168,16 @@ int main(int argc, char **argv) {
 	// COMMAND LINE PARAMETERS
 	key_t key = atoi(argv[1]);  // KEY TO SHM
 	unsigned char resource_count = atoi(argv[2]);  // NUMBER OF resources
+	
+	g_quotapid = atoi(argv[3]);  // process id of a signaller
+	
+	const struct sigaction act;
+	
+	act.sa_handler = sig_quota_update;
+	act.sa_flags = SA_SIGINFO;
+	act.sa_mask = 0;
+	
+	sigaction(g_shared_prog_signal,&act,NULL);
 
 	//
 	ofstream out("q.log");

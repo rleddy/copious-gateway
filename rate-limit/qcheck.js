@@ -9,6 +9,11 @@ const Authorizer = require('./auth-handler')
 const HeaderOps = require('./header-ops')
 const BodyOps = require('./body-ops')
 
+if ( loggerPool === undefined ) {	// app wide global
+	global.loggerPool = require('./defaultLoggerPool')
+}
+
+
 
 //each child process has a section of memory...
 
@@ -83,28 +88,37 @@ function setupBodyTransorms(body_transforms) {
 }
 
 
+function do_conifiguration(conf) {
+	// when this worker starts running, the master assigns it this index.
+	if ( conf.quota !== undefined ) {
+		setupQuota(conf.quota)
+	}
+	if ( conf.burst_config !== undefined ) {
+		setupBurstResponse(conf.burst_config)
+	}
+	if ( conf.authorizer !== undefined ) {
+		setupAuthorizer(conf.authorizer)
+	}
+	if ( conf.header_ops !== undefined ) {
+		setupHeaderOps(conf.header_ops)
+	}
+	if ( conf.body_transforms !== undefined ) {
+		setupBodyTransorms(conf.body_transforms)
+	}
+}
+
+
 if ( process.send ) {
 	process.on('message',(msg) => {
 			   if ( msg && ((msg.serverOps !== undefined) && msg.serverOps) && (g_AppServer === null) ) {
 				   g_AppServer = new NetServer(msg);
 			   }
 			   if ( msg && ((msg.configurationOps !== undefined) && msg.configurationOps) && (g_AppServer !== null) ) {
-				   // when this worker starts running, the master assigns it this index.
-				   if ( msg.quota !== undefined ) {
-			   			setupQuota(quota)
-				   }
-				   if ( msg.burst_config !== undefined ) {
-			   			setupBurstResponse(msg.burst_config)
-				   }
-				   if ( msg.authorizer !== undefined ) {
-					   setupAuthorizer(msg.authorizer)
-				   }
-				   if ( msg.header_ops !== undefined ) {
-					   setupHeaderOps(msg.header_ops)
-				   }
-				   if ( msg.body_transforms !== undefined ) {
-			   			setupBodyTransorms(msg.body_transforms)
-				   }
+			   		do_conifiguration(msg)
+			   }
+			   if ( msg && msg.nonce_only ) {
+					var auth = appServer.getAuthorizer()
+			   		auth.setNonce(msg.nonce)
 			   }
 			})
 } else {
